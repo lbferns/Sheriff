@@ -42,7 +42,7 @@ def stdoutsuppress():
             os.dup2(original_stdout_fd, sys.stdout.fileno())
             os.dup2(original_stderr_fd, sys.stderr.fileno())
 
-# class that handles kmer matching
+##### Stores kmers given a sequence - used to store T7 barcode kmers
 class KmerMatcher:
 
     def __init__(self, k, sequences=None):
@@ -57,6 +57,7 @@ class KmerMatcher:
             # Load in kmer initial input
             self.update_matches(sequences)
     
+    # Inputs the sequences
     def update_matches(self, sequences):
         if isinstance(sequences, str):
             self.add_kmers(sequences)
@@ -104,8 +105,6 @@ class KmerMatcher:
         comp_table = str.maketrans('ATCG', 'TAGC')  # used for revcomp
         return seq[::-1].translate( comp_table )
 
-# GOTTA BE A BETTER WAY
-# TRY DOING A DECORATOR, MIGHT MAKE MOST SENSE
 def reformat_chr_name(read):
     """ Reformats the chromosome name attached to the read to be conistent with the reference genome naming.
     In this case, the bam stores the chromosome names as hg38_1 (for chr1). But the fasta stores as 1. So just 
@@ -113,17 +112,22 @@ def reformat_chr_name(read):
     """
     return read.reference_name.replace('hg38_', '')
 
+##### Records kmer overlap between OBSERVED read sequence and KNOWN T7 barcode
 def match_kmer(bc_kmer_matcher, indel_seq, output_kmer_hash):
     """Gets kmer matches
     """
+    # Indel seq - Sequence before aligned portion of current read (potential T7 barcode)
+    # kmer matcher - Kmers from the known T7 barcode
+    
     k = bc_kmer_matcher.k
-    match_kmers = bc_kmer_matcher.match_hash
+    match_kmers = bc_kmer_matcher.match_hash #Grabs the T7 barcode kmers
 
     # Will count every barcode occurance in N time, uses numerical hashes
     # Scalable and allows for mismatches amongst other things
-    freq_array = np.zeros((4 ** k), dtype=np.uint8)
+    freq_array = np.zeros((4 ** k), dtype=np.uint8) # Method to count occurence of each kmer
 
     try:
+        # Freq array tells us which kmers occur in the read sequence, and how many times 
         freq_array[[bc_kmer_matcher.kmer_to_num(indel_seq[i: i + k])
                     for i in range(len(indel_seq) - k + 1)]] += 1
     except KeyError:
@@ -138,26 +142,30 @@ def match_kmer(bc_kmer_matcher, indel_seq, output_kmer_hash):
                 if 'N' not in kmer
             ]
         ] += 1
+        
 
+    # Grabs the kmers which actually occured in read sequence
     kmer_matches = freq_array.nonzero()[0]
 
-    # For our use match_kmers won't be None
     if match_kmers is not None:
+        # Match_kmers - KNOWN T7 barcode kmers
+        # kmer_matches - OBSERVED kmers of current read
+        # Filters for intersection between these sets
         kmer_matches = kmer_matches[np.isin(kmer_matches, match_kmers)]
+
 
         if kmer_matches.size == 0:
             kmer_matches = None
         elif output_kmer_hash:
-            # Show matches as hash index instead of kmers
-            # Not sure if this is best idea, but needed to hash into set
             kmer_matches = tuple(kmer_matches)
         else:
-            # Show kmer matches instead of hash
             kmer_matches = tuple(bc_kmer_matcher.num_to_kmer(i, k) for i in kmer_matches)
 
+    # Returns the matches to construct read edit
+    # Kmer matches contains the matching kmers, None if no matches
     return kmer_matches
 
-# Updated process forward and reverse
+##### Compares read to T7 barcode, stores edit results
 def match_barcode_forward(read, fasta, bc_kmer_matcher, output_kmer_hash=False):
 
     # Need enough space for insert
@@ -193,8 +201,7 @@ def match_barcode_forward(read, fasta, bc_kmer_matcher, output_kmer_hash=False):
     ReadEdit = namedtuple("ReadEdit", ["chrom", "ref_pos", "ref_seq", "alt_seq", "forward", "kmer_matches"])
 
     return ReadEdit(read.reference_name, ref_pos, ref_seq, alt_seq, read.is_forward, kmer_matches)
-
-    
+   
 def match_barcode_reverse(read, fasta, bc_kmer_matcher, output_kmer_hash=False):
 
     if read.query_length - read.query_alignment_end < bc_kmer_matcher.k:
@@ -249,7 +256,8 @@ def get_blacklist_kmer_matches(edit_data, blacklist_seq_kmers_rev, blacklist_mat
 
     return blacklist_kmer_matches
 
-# UPDATED FOR EFFICIENCY
+####### Main function of Step 1: Identifying candidate T7 reads
+# Records candidate edit sites and the evidence supporting them
 def get_barcoded_edits(bam_file, cell_barcodes,
                        ref_fasta_file,
                        k, t7_barcode,
@@ -265,14 +273,6 @@ def get_barcoded_edits(bam_file, cell_barcodes,
     # to the global set of edit_datas !
     chr_edits_order_added = defaultdict( list )
 
-    ### Old version, which was more 'cell-centric' metadata. Is tricky to do posthoc filtering with this form
-    ### of storing the data, so will make it all 'edit-centric', and reverse it to be 'cell-centric' metadata
-    ### after filtering out initially called edits which are not well supported.
-    # t7_barcoded_reads = []
-    # read_edits = []
-    # bc_edits = defaultdict(list)  # list iteration faster than set for part 2
-    # bc_umi = defaultdict(set)
-
     # Edit centric data structures.
     edit_counts = {} # ReadEdit to number of unique cell barcodes, updated throughout
     edit_bc_cell_umis = defaultdict(dict) # edit to barcode to umis
@@ -281,6 +281,7 @@ def get_barcoded_edits(bam_file, cell_barcodes,
     # Holds edit data if read is t7...doesn't seem to work if defined here and called in match func
     # ReadEdit = namedtuple("ReadEdit", ["chrom", "ref_pos", "ref_seq", "alt_seq", "forward", "kmer_matches"])
 
+    # Initializes the kmer matcher with the T7 barcode, forward and reverse direction
     bc_kmer_matcher_forward = KmerMatcher(k, t7_barcode)
     bc_kmer_matcher_reverse = KmerMatcher(k, KmerMatcher.revcomp(t7_barcode))
 
@@ -315,23 +316,31 @@ def get_barcoded_edits(bam_file, cell_barcodes,
         idx_stats = bam.get_index_statistics()
         total_reads = np.sum([stat.total for stat in idx_stats])
         
+        ########## Iterates through BAM file one read at a time
+        ##########
         for i, read in enumerate(bam):
 
             cell_barcode = read.get_tag('CB')
-            # If the cell barcode is NOT in the cell barcode white list, do not neeed to process.
+            # If the cell barcode is NOT in the cell barcode white list, do not need to process.
             if cell_barcode not in cell_barcodes:
                 continue
+            # So there are only certain cell barcodes that we re concerned with?
 
             if i % print_freq == 0 and verbosity==1:
                 print(f"PROCESSED {i} / {total_reads} reads in {(timeit.default_timer()-start_time)/60:.3f} minutes",
               file=sys.stdout, flush=True)
 
+            #############
+            ############# Matching algorithm. Compares current read to T7 barcode kmer matcher
             if read.is_forward:
                 edit_data = match_barcode_forward(read, fasta, bc_kmer_matcher_forward, output_kmer_hash)
             else:
                 edit_data = match_barcode_reverse(read, fasta, bc_kmer_matcher_reverse, output_kmer_hash)
+            ############
+            # Output is edit data, object that contains: position, sequence, matching kmers
+            ############
 
-            # If edit data contained barcode kmer match, then it's a t7 read
+            # FIRST DECISION: Throws out reads that do NOT have 1 kmer match with T7 barcode
             if (edit_data is not None) and (edit_data.kmer_matches is not None):
 
                 # HERE is where I additionally check for TSO match...
@@ -406,7 +415,6 @@ def get_barcoded_edits(bam_file, cell_barcodes,
 
     # Edit-centric version, for ease of post-hoc filtering once collapsed to canonical edit sites.
     return edit_counts, edit_bc_cell_umis, edit_reads, chr_edit_loc_indices, chr_edits_order_added
-
 
 def get_nonbarcoded_edits(bam_file, canonical_to_edits, canonical_to_edited_cells,
                           cells_to_canonical_and_edits, edit_reads_filtered,
@@ -491,6 +499,9 @@ def get_nonbarcoded_edits(bam_file, canonical_to_edits, canonical_to_edited_cell
     return t7_nonbarcoded_reads, nonbarcoded_umi, canonical_edit_no_bc_cell_umis
 
 
+###########
+# This function runs everything
+############
 def run_count_t7(bam_file,
                  ref_file,
                  barcode_file,
@@ -517,27 +528,28 @@ def run_count_t7(bam_file,
                  chunk_size_mb=15, #Mb to process at a time, in parallel.
                  ):
     
-    # Process output data stuff
+    # Creates output dir if needed
     if outdir is None:
         outdir = Path.cwd()
     
     out_path = Path(outdir)
     out_path.mkdir(parents=True, exist_ok=True) # Create dir before making output files
 
-    # Load whitelisted barcodes
+    # Load whitelisted barcodes (known edit sites)
     with open(barcode_file) as file:
         cell_barcodes_list = [line.rstrip() for line in file]
         cell_barcodes_dict = {key: value for value, key in enumerate(cell_barcodes_list)}
         cell_barcodes = set(cell_barcodes_list)
     
-    
-    # Step 1: Get barcoded t7 edits
+    ############################################################################
+    ######### Step 1: Get candidate T7 reads and edit sites
+    ############################################################################
     print_freq = 1000000 # for testing
     
     start_bc = timeit.default_timer()
     print("Counting barcoded edits...", file=sys.stdout, flush=True) if verbosity >= 1 else None
 
-    ## Edit-centric version, much easier to filter out edits that are not well-supported!
+    # Returns candidate edit sites (reads that had matching kmer with T7 barcode) and supporting evidence
     edit_counts, edit_bc_cell_umis, edit_reads, chr_edit_loc_indices, chr_edits_order_added = get_barcoded_edits(
         bam_file,
         cell_barcodes,
@@ -560,7 +572,9 @@ def run_count_t7(bam_file,
 
     EditSite = namedtuple("EditSite", ["chrom", "ref_pos"])
 
+    # Sorts the candidate edit sites by the number of cells with that edit
     edit_order = np.argsort(-edit_count_values)
+    
     edit_indices_processed = [] # Keeping track of the indices of the edits already processed, so don't assign multiple labels!
     canonical_edit_sites = [] # Final set of canonical edit sites, with small variations collapsed
     canonical_edit_reversed = [] # For each edit site, is there the reverse compliment for that edit site.
@@ -568,6 +582,10 @@ def run_count_t7(bam_file,
     #edit_labels = np.full((len(edit_datas)), fill_value=np.nan) # Labels for all edits, indicating index of the canonical edit site for the edit.
     edits_to_canonical = {}
     canonical_to_edits = {}
+    
+    ########### 
+    # Greedy algo - Process of turning candidate edit sites into Canonical sites - Start with highest-supported (most reads) candidate edit, group nearby edits
+    ###########
     for orderi, editi in enumerate(edit_order):
         edit_data = edit_datas[editi]
         if editi not in edit_indices_processed:
@@ -578,6 +596,7 @@ def run_count_t7(bam_file,
             chr_index = chr_edit_loc_indices[ edit_data.chrom ]
             _, dists, close_neighbour_indices = chr_index.range_search(np.array(edit_data.ref_pos).reshape(-1, 1),
                                                                        edit_dist**2) # ^2 since faiss will use L2 norm.
+            
             # Filtering to the indices that have not already been assigned!
             close_neighbour_indices_GLOBAL = np.array([edit_datas.index( chr_edit_datas[index] ) for index in close_neighbour_indices])
             keep_bool = [index not in edit_indices_processed for index in close_neighbour_indices_GLOBAL]
@@ -614,35 +633,30 @@ def run_count_t7(bam_file,
             if not expected_range:
                 print("Warning: Distances NOT within expected range!", file=sys.stdout, flush=True)
 
-            # Saving the canonical edit site, will just reference the position!
+            ######## Creates canonical edit site (site with highest count)
+            # just saves position
             edit_site = EditSite(edit_data.chrom, edit_data.ref_pos)
             canonical_edit_sites.append( edit_site )
-            # Adding in the label for these nearby edits as this most common edit site!
-            #edit_labels[close_neighbour_indices] = len(canonical_edit_sites)
+            
+            ## Map nearby candidates to canonical site just created
             edits_to_this_canonical = {chr_edit_datas[neighi]: edit_site for neighi in close_neighbour_indices}
             edits_to_canonical.update( edits_to_this_canonical )
             canonical_to_edits[edit_site] = list( edits_to_this_canonical.keys() )
 
-            # Determining if the edits associated with the canonical site has both forward and reverse direction,
+            # FILTER: Determining if the edits associated with the canonical site has both forward and reverse direction,
             # which is good evidence of t7 insert site since can insert in either direction!
             canonical_site_directions = []
             canonical_edit_site_cell_set = set()
-            #canonical_edit_cell_counts.append( 0 )
             for neighi in close_neighbour_indices:
-                # OLD version, this works fine when parallelised by chromosome, BUT if running on a full bam across
-                # chromosomes it introduces a bug!
-                #neigh_edit = edit_datas[neighi]
                 neigh_edit = chr_edit_datas[neighi]
-
                 # Keeping track if there is evidence of an edit variation in both directions.
                 canonical_site_directions.append( neigh_edit.forward )
 
-                # Counting number of cells UNIQUE cells
+                ###### Count unqiue cells that support ANY of the candidate edits within this cannonical site
                 canonical_edit_site_cell_set = canonical_edit_site_cell_set.union( set(
                                                                           list(edit_bc_cell_umis[neigh_edit].keys()) ) )
-
+                ######
             canonical_edit_cell_counts.append( len( canonical_edit_site_cell_set ) )
-
             # Has both forward and reverse direction!
             canonical_edit_reversed.append( len(set(canonical_site_directions)) == 2 )
 
@@ -650,6 +664,12 @@ def run_count_t7(bam_file,
             print(f"Processed edit {orderi} / {len(edit_datas)}", file=sys.stdout, flush=True) if verbosity>= 1 else None
 
     print("Done calling canonical edits", file=sys.stdout, flush=True) if verbosity>= 1 else None
+    
+    
+    #######
+    # Question: Which canonical edits do we keep? FILTERING step
+    # This is after the greedy algo has run and grouped candidate reads into candidate canonical sites
+    ######
 
     ####################################################################################################################
     print(f"Filtering canonical edits to those with criteria: min_cells: {edit_site_min_cells}, "
@@ -686,7 +706,6 @@ def run_count_t7(bam_file,
               file=sys.stdout, flush=True) if verbosity>= 1 else None
 
     # Now also filtering based on stranded edit distance!!!
-    #if edit_site_rev_comp_filt and type(stranded_edit_dist)!=type(None):
     keep_indices = np.where(keep_sites)[0]
     canonical_to_stranded_edit_dist = {}
     for index in keep_indices:
@@ -721,10 +740,10 @@ def run_count_t7(bam_file,
     # Now need to filter all information for association with unsupported canonical edits...
     called_edit_sites = [edit for i, edit in enumerate(canonical_edit_sites) if keep_sites[i]]
     
-    # # for debugging with CHD4 edit site as example..
-    # chd4_edits = [edit for edit in called_edit_sites if str(edit.ref_pos).startswith('6602')]
     print(f"Finished edit site calling.", file=sys.stdout, flush=True) if verbosity>= 1 else None
 
+
+    #### Throw away candidate-edit informations of canincial sites that failed thresholds
     print("Filtering called t7 reads that do not fit a canonical edit site with minimum criteria cutoffs.",
               file=sys.stdout, flush=True) if verbosity >= 1 else None
     called_edit_sites_counts = np.array(canonical_edit_cell_counts)[keep_sites]
@@ -752,6 +771,10 @@ def run_count_t7(bam_file,
     ####################################################################################################################
     # Step 3: Get NON-Barcoded t7 edits;
     #   3.1: IF cell has known edit, mop up non-BC reads as those within X bp that are in-line with edit.
+    
+    
+    # Non-barcoded T7 edits are reads that have T7 barcode, however do not have cell barcode
+    #
     ####################################################################################################################
     print("Counting Non-barcoded edits...", file=sys.stdout, flush=True) if verbosity >= 1 else None
 
@@ -759,14 +782,11 @@ def run_count_t7(bam_file,
     canonical_to_edits = defaultdict(list)
     [canonical_to_edits[edit_site].append( edit_data ) for edit_data, edit_site in edits_to_canonical_filtered.items()]
 
-    # Previously using a list to lookup was making nonbarcoded super slow...
     canonical_to_edited_cells = defaultdict(set)
     for edit_data, edit_site in edits_to_canonical_filtered.items():
         canonical_to_edited_cells[edit_site].update(edit_bc_cell_umis_filtered[edit_data].keys())
 
-    # Nested defaultdict
-    cells_to_canonical_and_edits = defaultdict(lambda: defaultdict(list)) # Would set be better?
-    # cells_to_canonical_and_edits = defaultdict(dict) # Nested dictionary; cell_barcodes -> edit_site -> particular edit
+    cells_to_canonical_and_edits = defaultdict(lambda: defaultdict(list)) 
     
     for edit_site, edits in canonical_to_edits.items():
         for edit in edits:

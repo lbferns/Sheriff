@@ -12,6 +12,11 @@ from .count_t7 import run_count_t7
 # app = typer.Typer(pretty_exceptions_show_locals=False)
 app = typer.Typer(pretty_exceptions_short=False)
 
+
+
+
+# Takes command line arguments and options and passes to this function
+# Function organizes all inputs, passes to run count t7
 @app.command()
 def get_t7_edits(
     bam_file: Annotated[str, typer.Argument(help="BAM file")],
@@ -234,7 +239,7 @@ chunk_size_mb: Annotated[
                  )
 
 def main():
-    root_dir = Path(__file__).parent
+    root_dir = Path(__file__).parent #grabs the directory that the current file being run is in
     sys.path.append(str(root_dir))
     app()
 
